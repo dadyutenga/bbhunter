@@ -128,6 +128,33 @@ def call_anthropic(api_key, prompt):
         raise RuntimeError(f"Anthropic API HTTP {ex.code}: {body[:300]}") from ex
     return "".join(part.get("text", "") for part in data.get("content", [])).strip()
 
+def call_grok(api_key, prompt):
+    try:
+        max_tokens = int(os.getenv("BBHUNTER_AI_MAX_TOKENS", "1200"))
+    except ValueError:
+        max_tokens = 1200
+    payload = {
+        "model": "grok-2-1212",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    req = urllib.request.Request(
+        "https://api.x.ai/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Grok API HTTP {ex.code}: {body[:300]}") from ex
+    return data["choices"][0]["message"]["content"].strip()
+
 # ─────────────────────────────────────────────────────────────────────────
 #  MODULE 1 — RECON
 # ─────────────────────────────────────────────────────────────────────────
@@ -141,6 +168,46 @@ WORDLIST = [
     "api-v1","api-v2","api-dev","api-staging","api-prod",
 ]
 
+def load_wordlist(path):
+    """Load subdomain wordlist from file, one per line, supports # comments."""
+    words = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                words.append(line)
+    return words
+
+def crtsh_enum(domain):
+    """Passive subdomain enumeration via crt.sh."""
+    url = f"https://crt.sh/?q=%25.{urllib.parse.quote(domain)}&output=json"
+    info(f"Querying crt.sh for *.{domain} ...")
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(url, headers={"User-Agent": "BBHunter/1.0"})
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+            if r.status != 200:
+                warn(f"crt.sh returned HTTP {r.status}")
+                return []
+            body = r.read().decode("utf-8", errors="ignore")
+        entries = json.loads(body) if body else []
+        subs = set()
+        for entry in entries:
+            name = entry.get("name_value", "")
+            for part in name.split("\n"):
+                part = part.strip().lower()
+                if part.endswith(f".{domain}") or part == domain:
+                    part = part.lstrip("*.")
+                    if part:
+                        subs.add(part)
+        ok(f"crt.sh returned {len(subs)} unique names")
+        return list(subs)
+    except Exception as ex:
+        warn(f"crt.sh enumeration error: {ex}")
+        return []
+
 def resolve(sub, domain):
     fqdn = f"{sub}.{domain}"
     try:
@@ -149,21 +216,49 @@ def resolve(sub, domain):
     except Exception:
         return None
 
-def run_recon(domain, output_dir, threads=50):
+def resolve_fqdn(fqdn):
+    """Resolve an already-qualified domain name."""
+    try:
+        ip = socket.gethostbyname(fqdn)
+        return fqdn, ip
+    except Exception:
+        return None
+
+def run_recon(domain, output_dir, threads=50, wordlist_path=None):
     section(f"RECON  →  {domain}")
     results = {"domain": domain, "timestamp": str(datetime.datetime.now()), "subdomains": []}
-
-    # DNS resolution
-    info(f"Enumerating {len(WORDLIST)} common subdomains with {threads} threads...")
+    found_set = set()
     found = []
+
+    # ── Passive enumeration via crt.sh ──────────────────────────────────
+    crt_names = crtsh_enum(domain)
+    if crt_names:
+        info(f"Resolving {len(crt_names)} crt.sh results with {threads} threads...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as ex:
+            for res in ex.map(resolve_fqdn, crt_names):
+                if res:
+                    fqdn, ip = res
+                    if fqdn not in found_set:
+                        found_set.add(fqdn)
+                        ok(f"  {G}{fqdn}{RST}  →  {DIM}{ip}{RST}  {DIM}(crt.sh){RST}")
+                        found.append({"subdomain": fqdn, "ip": ip, "source": "crt.sh"})
+
+    # ── Wordlist brute-force ────────────────────────────────────────────
+    wl = WORDLIST
+    if wordlist_path:
+        info(f"Loading custom wordlist: {wordlist_path}")
+        wl = load_wordlist(wordlist_path)
+    info(f"Brute-forcing {len(wl)} subdomains with {threads} threads...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as ex:
-        futures = {ex.submit(resolve, sub, domain): sub for sub in WORDLIST}
+        futures = {ex.submit(resolve, sub, domain): sub for sub in wl}
         for fut in concurrent.futures.as_completed(futures):
             res = fut.result()
             if res:
                 fqdn, ip = res
-                ok(f"  {G}{fqdn}{RST}  →  {DIM}{ip}{RST}")
-                found.append({"subdomain": fqdn, "ip": ip})
+                if fqdn not in found_set:
+                    found_set.add(fqdn)
+                    ok(f"  {G}{fqdn}{RST}  →  {DIM}{ip}{RST}")
+                    found.append({"subdomain": fqdn, "ip": ip, "source": "brute"})
 
     results["subdomains"] = found
 
@@ -258,7 +353,50 @@ def check_cors(url):
         pass
     return None
 
-def run_scan(url, output_dir):
+def generate_burp_requests(output_dir, results):
+    """Generate .http files for HIGH/CRITICAL findings and 200 responses."""
+    burp_dir = os.path.join(output_dir, "burp_requests")
+    Path(burp_dir).mkdir(parents=True, exist_ok=True)
+    count = 0
+    target_url = results.get("url", "")
+    parsed = urllib.parse.urlparse(target_url)
+    host = parsed.netloc or "unknown"
+
+    for i, f in enumerate(results.get("findings", [])):
+        sev = f.get("severity", "")
+        title = f.get("title", "")
+        detail = f.get("detail", "")
+
+        is_high_crit = sev in ("HIGH", "CRITICAL")
+        is_interesting_200 = "HTTP 200" in detail or ("accessible" in title.lower() and sev == "HIGH")
+        if not (is_high_crit or is_interesting_200):
+            continue
+
+        # Determine the path for the request
+        path = "/"
+        if detail and detail.startswith("/"):
+            path = detail.split()[0]
+        elif "path" in title.lower():
+            # Extract path from title like "Sensitive path accessible: /.env"
+            parts = title.split(":")
+            if len(parts) > 1:
+                path = parts[-1].strip().split()[0]
+
+        safe_title = re.sub(r"[^a-zA-Z0-9._-]+", "_", title)[:60]
+        fname = os.path.join(burp_dir, f"{i:03d}_{safe_title}.http")
+        with open(fname, "w") as fp:
+            fp.write(f"GET {path} HTTP/1.1\r\n")
+            fp.write(f"Host: {host}\r\n")
+            fp.write("User-Agent: BBHunter/1.0\r\n")
+            fp.write("Accept: */*\r\n")
+            fp.write("Connection: close\r\n")
+            fp.write("\r\n")
+        count += 1
+
+    if count:
+        ok(f"Generated {count} Burp/Repeater .http files → {burp_dir}")
+
+def run_scan(url, output_dir, nuclei=False):
     section(f"VULN SCAN  →  {url}")
     results = {
         "url": url,
@@ -373,13 +511,147 @@ def run_scan(url, output_dir):
     if output_dir:
         save_json(f"{output_dir}/scan_{urllib.parse.urlparse(url).netloc}.json", results)
 
+    # ── Nuclei-Lite ──────────────────────────────────────────────────────
+    if nuclei:
+        section("NUCLEI-LITE SCAN")
+        if subprocess.call(["which", "nuclei"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+            err("nuclei is not installed. Install from https://github.com/projectdiscovery/nuclei")
+        else:
+            templates = "exposed-panels,misconfiguration,vulnerabilities,default-logins,cves,takeovers"
+            info(f"Running nuclei with templates: {templates}")
+            try:
+                proc = subprocess.run(
+                    ["nuclei", "-u", url, "-t", templates, "-jsonl", "-silent"],
+                    capture_output=True, text=True, timeout=300,
+                )
+                nuclei_findings = []
+                for line in proc.stdout.strip().splitlines():
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                        nuclei_findings.append(item)
+                    except json.JSONDecodeError:
+                        pass
+                if nuclei_findings:
+                    for nf in nuclei_findings:
+                        sev = (nf.get("info", {}).get("severity", "info")).upper()
+                        name = nf.get("info", {}).get("name", nf.get("template-id", "?"))
+                        matched = nf.get("matched-at", "")
+                        tag = {
+                            "CRITICAL": f"{R}[CRITICAL]{RST}",
+                            "HIGH":     f"{R}[HIGH]{RST}",
+                            "MEDIUM":   f"{Y}[MEDIUM]{RST}",
+                            "LOW":      f"{B}[LOW]{RST}",
+                        }.get(sev, f"{DIM}[{sev}]{RST}")
+                        print(f"  {tag} {name}  {DIM}{matched}{RST}")
+                        results["findings"].append({"severity": sev, "title": f"[nuclei] {name}", "detail": matched})
+                    ok(f"Nuclei found {len(nuclei_findings)} issue(s)")
+                else:
+                    ok("Nuclei found no issues")
+            except subprocess.TimeoutExpired:
+                warn("Nuclei scan timed out (300s)")
+            except Exception as ex:
+                err(f"Nuclei error: {ex}")
+
+    # ── Auto-generate Burp / Repeater .http files ────────────────────────
+    if output_dir:
+        generate_burp_requests(output_dir, results)
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  MODULE 2b — DIRECTORY BRUTE-FORCE (dirb)
+# ─────────────────────────────────────────────────────────────────────────
+DIRB_WORDLIST = [
+    "admin", "administrator", "api", "app", "assets", "auth", "backup",
+    "bin", "blog", "cache", "cgi-bin", "cms", "config", "console",
+    "css", "dashboard", "data", "db", "debug", "dev", "docs", "download",
+    "downloads", "editor", "email", "error", "export", "files", "fonts",
+    "forum", "graphql", "help", "home", "html", "images", "img", "import",
+    "includes", "index", "info", "install", "internal", "js", "json",
+    "lib", "log", "login", "logout", "logs", "mail", "main", "manage",
+    "media", "metrics", "mobile", "modules", "monitor", "new", "node",
+    "old", "panel", "phpinfo", "phpmyadmin", "plugins", "portal",
+    "private", "profile", "public", "reports", "rest", "robots.txt",
+    "scripts", "search", "server-status", "settings", "setup", "sitemap",
+    "sitemap.xml", "static", "status", "storage", "swagger", "system",
+    "temp", "test", "tmp", "tools", "upload", "uploads", "user", "users",
+    "vendor", "version", "web", "webmail", "wp-admin", "wp-content",
+    "wp-login.php", "xmlrpc.php",
+]
+
+def run_dirb(url, output_dir, wordlist_path=None, threads=40, status_filter="200,204,301,302,307,401,403,500"):
+    section(f"DIRB  →  {url}")
+    allowed = set(int(s.strip()) for s in status_filter.split(",") if s.strip())
+
+    wl = DIRB_WORDLIST
+    if wordlist_path:
+        info(f"Loading custom wordlist: {wordlist_path}")
+        wl = load_wordlist(wordlist_path)
+
+    base = url.rstrip("/")
+    info(f"Brute-forcing {len(wl)} paths with {threads} threads  (status: {status_filter})")
+
+    results = {
+        "url": url,
+        "timestamp": str(datetime.datetime.now()),
+        "findings": [],
+    }
+
+    def dirb_probe(word):
+        path = f"/{word}" if not word.startswith("/") else word
+        target = f"{base}{path}"
+        try:
+            r = http_get(target, timeout=5)
+            if r:
+                code, hdrs, body = r
+                if code in allowed:
+                    return {"path": path, "url": target, "status": code, "size": len(body),
+                            "server": hdrs.get("Server", "")}
+        except Exception:
+            pass
+        return None
+
+    found = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as ex:
+        for res in ex.map(dirb_probe, wl):
+            if res:
+                code = res["status"]
+                color = G if code == 200 else (Y if code in (301, 302, 307) else (M if code in (401, 403) else R))
+                print(f"  {color}[{code}]{RST}  {res['path']:30s}  {DIM}size={res['size']}b{RST}")
+                found.append(res)
+
+    results["findings"] = found
+
+    section("DIRB SUMMARY")
+    ok(f"Found {len(found)} paths matching status filter")
+    for code in sorted(set(f["status"] for f in found)):
+        cnt = sum(1 for f in found if f["status"] == code)
+        print(f"  HTTP {code}: {cnt}")
+
+    if output_dir:
+        netloc = urllib.parse.urlparse(url).netloc
+        save_json(f"{output_dir}/dirb_{netloc}.json", results)
+        # Generate Burp requests for interesting 200 responses
+        burp_results = {"url": url, "findings": []}
+        for f in found:
+            if f["status"] == 200:
+                burp_results["findings"].append({
+                    "severity": "HIGH", "title": f"Dir found: {f['path']}",
+                    "detail": f"HTTP 200  size={f['size']}b",
+                })
+        if burp_results["findings"]:
+            generate_burp_requests(output_dir, burp_results)
+
     return results
 
 
 # ─────────────────────────────────────────────────────────────────────────
 #  MODULE 4 — AI VULNERABILITY ANALYZER
 # ─────────────────────────────────────────────────────────────────────────
-def run_ai_analyze(file_path, url, auto, output_dir):
+def run_ai_analyze(file_path, url, auto, output_dir, provider="auto"):
     section("AI ANALYZE")
 
     results = None
@@ -432,13 +704,38 @@ def run_ai_analyze(file_path, url, auto, output_dir):
     try:
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
         openai_key = os.getenv("OPENAI_API_KEY")
-        if anthropic_key:
+        grok_key = os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")
+
+        provider_used = None
+        if provider == "anthropic":
+            if not anthropic_key:
+                err("ANTHROPIC_API_KEY not set"); return
             analysis = call_anthropic(anthropic_key, prompt)
-        elif openai_key:
+            provider_used = "Anthropic (claude-3-5-haiku)"
+        elif provider == "openai":
+            if not openai_key:
+                err("OPENAI_API_KEY not set"); return
             analysis = call_openai(openai_key, prompt)
-        else:
-            err("Missing API key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY")
-            return
+            provider_used = "OpenAI (gpt-4o-mini)"
+        elif provider == "grok":
+            if not grok_key:
+                err("GROK_API_KEY or XAI_API_KEY not set"); return
+            analysis = call_grok(grok_key, prompt)
+            provider_used = "Grok (grok-2-1212)"
+        else:  # auto
+            if anthropic_key:
+                analysis = call_anthropic(anthropic_key, prompt)
+                provider_used = "Anthropic (claude-3-5-haiku)"
+            elif openai_key:
+                analysis = call_openai(openai_key, prompt)
+                provider_used = "OpenAI (gpt-4o-mini)"
+            elif grok_key:
+                analysis = call_grok(grok_key, prompt)
+                provider_used = "Grok (grok-2-1212)"
+            else:
+                err("Missing API key. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GROK_API_KEY / XAI_API_KEY")
+                return
+        info(f"Provider: {provider_used}")
     except Exception as ex:
         err(f"AI analysis failed: {ex}")
         return
@@ -790,8 +1087,18 @@ def main():
   Recon a domain:
     python bbhunter.py recon -d example.com
 
+  Recon with custom wordlist:
+    python bbhunter.py recon -d example.com -w subs.txt
+
   Scan a URL for vulnerabilities:
     python bbhunter.py scan -u https://example.com
+
+  Scan with Nuclei-Lite:
+    python bbhunter.py scan -u https://example.com --nuclei
+
+  Directory brute-force:
+    python bbhunter.py dirb -u https://example.com
+    python bbhunter.py dirb -u https://example.com -w dirs.txt -t 60
 
   Generate XSS payloads:
     python bbhunter.py payloads -t xss -c bypass
@@ -804,6 +1111,9 @@ def main():
 
   Analyze scan output with AI:
     python bbhunter.py ai-analyze -f ./results/scan_example.com.json
+
+  Analyze with specific AI provider:
+    python bbhunter.py ai-analyze --auto --provider grok
 
   Save all output to a folder:
     python bbhunter.py recon -d example.com -o ./results
@@ -818,10 +1128,13 @@ def main():
     p_recon = sub.add_parser("recon", help="Subdomain enumeration + DNS recon")
     p_recon.add_argument("-d", "--domain", required=True, help="Target domain (e.g. example.com)")
     p_recon.add_argument("-t", "--threads", type=int, default=50, help="Threads (default: 50)")
+    p_recon.add_argument("-w", "--wordlist", help="Custom wordlist file (one subdomain per line, supports # comments)")
 
     # scan
     p_scan = sub.add_parser("scan", help="Vulnerability scanning of a URL")
     p_scan.add_argument("-u", "--url", required=True, help="Target URL (e.g. https://example.com)")
+    p_scan.add_argument("--nuclei", "--nuclei-lite", action="store_true", dest="nuclei",
+                        help="Run Nuclei-Lite scan with popular templates")
 
     # payloads
     p_pay = sub.add_parser("payloads", help="Generate attack payloads")
@@ -832,10 +1145,20 @@ def main():
     p_pay.add_argument("--list", action="store_true", help="List all available payload types")
 
     # ai-analyze
-    p_ai = sub.add_parser("ai-analyze", help="Analyze scan findings with Claude/GPT")
+    p_ai = sub.add_parser("ai-analyze", help="Analyze scan findings with AI (Claude/GPT/Grok)")
     p_ai.add_argument("-f", "--file", help="Path to scan JSON results")
     p_ai.add_argument("-u", "--url", help="Target URL to scan first (use with --auto)")
     p_ai.add_argument("--auto", action="store_true", help="Auto use latest scan JSON or scan URL first")
+    p_ai.add_argument("--provider", choices=["auto", "openai", "anthropic", "grok"],
+                      default="auto", help="AI provider (default: auto)")
+
+    # dirb
+    p_dirb = sub.add_parser("dirb", help="Directory brute-force")
+    p_dirb.add_argument("-u", "--url", required=True, help="Target URL (e.g. https://example.com)")
+    p_dirb.add_argument("-w", "--wordlist", help="Custom wordlist file (one path per line)")
+    p_dirb.add_argument("-t", "--threads", type=int, default=40, help="Threads (default: 40)")
+    p_dirb.add_argument("--status", default="200,204,301,302,307,401,403,500",
+                        help="Comma-separated status codes to show (default: 200,204,301,302,307,401,403,500)")
 
     # report
     sub.add_parser("report", help="Interactive bug bounty report writer")
@@ -844,10 +1167,14 @@ def main():
     out  = args.output
 
     if args.command == "recon":
-        run_recon(args.domain, out, args.threads)
+        run_recon(args.domain, out, args.threads, wordlist_path=args.wordlist)
 
     elif args.command == "scan":
-        run_scan(args.url, out)
+        run_scan(args.url, out, nuclei=args.nuclei)
+
+    elif args.command == "dirb":
+        run_dirb(args.url, out, wordlist_path=args.wordlist, threads=args.threads,
+                 status_filter=args.status)
 
     elif args.command == "payloads":
         if args.list or not args.vuln_type:
@@ -860,7 +1187,7 @@ def main():
             run_payloads(args.vuln_type, args.category, out)
 
     elif args.command == "ai-analyze":
-        run_ai_analyze(args.file, args.url, args.auto, out)
+        run_ai_analyze(args.file, args.url, args.auto, out, provider=args.provider)
 
     elif args.command == "report":
         run_report(out)
