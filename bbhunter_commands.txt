@@ -1,0 +1,181 @@
+╔══════════════════════════════════════════════════════════════════╗
+║              BBHunter - Bug Bounty CLI  · Commands Reference     ║
+╚══════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  GENERAL USAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  python bbhunter.py [command] [options] -o [output_dir]
+
+  -o / --output     Specify output directory (default: ./bbhunter_output)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MODULE 1 — RECON (Subdomain Enumeration + DNS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Basic recon on a domain:
+    python bbhunter.py recon -d example.com
+
+  Recon with custom thread count:
+    python bbhunter.py recon -d example.com -t 100
+
+  Recon and save results to a folder:
+    python bbhunter.py recon -d example.com -o ./results
+
+  Recon with threads + custom output:
+    python bbhunter.py recon -d example.com -t 80 -o ./results
+
+  Options:
+    -d / --domain     Target domain (required)  e.g. example.com
+    -t / --threads    Number of threads (default: 50)
+
+  What it does:
+    · Enumerates common subdomains (www, api, admin, dev, etc.)
+    · Resolves subdomains to IP addresses
+    · Probes HTTP/HTTPS on discovered subdomains
+    · Checks DNS TXT records (SPF, DMARC)
+    · Saves results to: [output_dir]/[domain]_recon.json
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MODULE 2 — VULNERABILITY SCAN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Scan a URL:
+    python bbhunter.py scan -u https://example.com
+
+  Scan and save results:
+    python bbhunter.py scan -u https://example.com -o ./results
+
+  Scan a specific subdomain:
+    python bbhunter.py scan -u https://admin.example.com
+
+  Scan over HTTP:
+    python bbhunter.py scan -u http://example.com
+
+  Options:
+    -u / --url        Target URL (required)  e.g. https://example.com
+
+  What it checks:
+    · Missing security headers (CSP, HSTS, X-Frame-Options, etc.)
+    · Interesting/leaked headers (Server, X-Powered-By, etc.)
+    · Sensitive file/path exposure (.env, .git/config, wp-config.php, etc.)
+    · CORS misconfiguration (wildcard origin, reflected origin + credentials)
+    · Saves results to: [output_dir]/scan_[host].json
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MODULE 3 — PAYLOADS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  List all available payload types:
+    python bbhunter.py payloads --list
+    python bbhunter.py payloads
+
+  Generate ALL payloads for a vuln type:
+    python bbhunter.py payloads -t xss
+    python bbhunter.py payloads -t sqli
+    python bbhunter.py payloads -t ssrf
+    python bbhunter.py payloads -t lfi
+    python bbhunter.py payloads -t open_redirect
+    python bbhunter.py payloads -t ssti
+    python bbhunter.py payloads -t xxe
+
+  Generate payloads by category:
+    python bbhunter.py payloads -t xss -c basic
+    python bbhunter.py payloads -t xss -c bypass
+    python bbhunter.py payloads -t xss -c blind
+    python bbhunter.py payloads -t sqli -c basic
+    python bbhunter.py payloads -t sqli -c bypass
+    python bbhunter.py payloads -t sqli -c blind
+    python bbhunter.py payloads -t ssrf -c basic
+    python bbhunter.py payloads -t lfi -c basic
+    python bbhunter.py payloads -t lfi -c bypass
+    python bbhunter.py payloads -t ssti -c basic
+    python bbhunter.py payloads -t xxe -c basic
+
+  Generate payloads and save to file:
+    python bbhunter.py payloads -t xss -c all -o ./results
+    python bbhunter.py payloads -t sqli -c bypass -o ./results
+
+  Options:
+    -t / --type       Vulnerability type (required unless --list)
+    -c / --category   Category: basic / bypass / blind / all (default: all)
+    --list            List all available payload types
+
+  Available vuln types:
+    xss             Cross-Site Scripting
+    sqli            SQL Injection
+    ssrf            Server-Side Request Forgery
+    lfi             Local File Inclusion
+    open_redirect   Open Redirect
+    ssti            Server-Side Template Injection
+    xxe             XML External Entity
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MODULE 4 — REPORT WRITER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Launch interactive report writer:
+    python bbhunter.py report
+
+  Launch report writer with custom output folder:
+    python bbhunter.py report -o ./my_reports
+
+  What it generates:
+    · Prompts you for: program name, your handle, vuln type,
+      severity, affected URL, vulnerable parameter, summary,
+      PoC payload, and steps to reproduce
+    · Auto-fills: impact description, CVSS score, CVSS vector,
+      remediation advice based on vuln type and severity
+    · Saves report to: [output_dir]/report_[vuln_type]_[date].md
+
+  Supported vuln types in report:
+    xss / sqli / ssrf / lfi / idor / cors / ssti / xxe / other
+
+  Severity levels:
+    critical / high / medium / low
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  COMBINED WORKFLOW EXAMPLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Full recon → scan → report workflow:
+
+    Step 1: Recon the target domain
+      python bbhunter.py recon -d example.com -o ./example_hunt
+
+    Step 2: Scan a discovered subdomain
+      python bbhunter.py scan -u https://admin.example.com -o ./example_hunt
+
+    Step 3: Get relevant payloads
+      python bbhunter.py payloads -t xss -c bypass -o ./example_hunt
+
+    Step 4: Write the bug bounty report
+      python bbhunter.py report -o ./example_hunt
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HELP COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  General help:
+    python bbhunter.py --help
+    python bbhunter.py -h
+
+  Help for a specific module:
+    python bbhunter.py recon --help
+    python bbhunter.py scan --help
+    python bbhunter.py payloads --help
+    python bbhunter.py report --help
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  OUTPUT FILES GENERATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [output_dir]/[domain]_recon.json        → Recon results
+  [output_dir]/scan_[host].json           → Scan findings
+  [output_dir]/payloads_[type].txt        → Generated payloads
+  [output_dir]/report_[type]_[date].md    → Bug bounty report
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Generated by BBHunter CLI Reference Sheet
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
