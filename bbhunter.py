@@ -73,6 +73,61 @@ def save_json(path, data):
         json.dump(data, f, indent=2)
     ok(f"Saved → {path}")
 
+def call_openai(api_key, prompt):
+    try:
+        max_tokens = int(os.getenv("BBHUNTER_AI_MAX_TOKENS", "1200"))
+    except ValueError:
+        max_tokens = 1200
+    payload = {
+        "model": "gpt-4o-mini",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"OpenAI API HTTP {ex.code}: {body[:300]}") from ex
+    return data["choices"][0]["message"]["content"].strip()
+
+def call_anthropic(api_key, prompt):
+    try:
+        max_tokens = int(os.getenv("BBHUNTER_AI_MAX_TOKENS", "1200"))
+    except ValueError:
+        max_tokens = 1200
+    payload = {
+        "model": "claude-3-5-haiku-latest",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Anthropic API HTTP {ex.code}: {body[:300]}") from ex
+    return "".join(part.get("text", "") for part in data.get("content", [])).strip()
+
 # ─────────────────────────────────────────────────────────────────────────
 #  MODULE 1 — RECON
 # ─────────────────────────────────────────────────────────────────────────
@@ -319,6 +374,84 @@ def run_scan(url, output_dir):
         save_json(f"{output_dir}/scan_{urllib.parse.urlparse(url).netloc}.json", results)
 
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  MODULE 4 — AI VULNERABILITY ANALYZER
+# ─────────────────────────────────────────────────────────────────────────
+def run_ai_analyze(file_path, url, auto, output_dir):
+    section("AI ANALYZE")
+
+    results = None
+    source = file_path
+    if auto and url:
+        info("Running scan first (--auto enabled)...")
+        results = run_scan(url, output_dir)
+        source = f"{output_dir}/scan_{urllib.parse.urlparse(url).netloc}.json"
+    elif file_path:
+        try:
+            with open(file_path, "r") as f:
+                results = json.load(f)
+        except Exception as ex:
+            err(f"Failed to read scan file: {ex}")
+            return
+    elif auto:
+        scan_files = sorted(Path(output_dir).glob("scan_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not scan_files:
+            err(f"No scan_*.json files found in {output_dir}")
+            return
+        source = str(scan_files[0])
+        with open(source, "r") as f:
+            results = json.load(f)
+    else:
+        err("Use -f/--file or --auto (optionally with -u/--url)")
+        return
+
+    if not isinstance(results, dict):
+        err("Invalid scan result format")
+        return
+
+    findings_count = len(results.get("findings", []))
+    print(f"{M}[AI]{RST} Analyzing {findings_count} findings from {source}...")
+    try:
+        max_chars = int(os.getenv("BBHUNTER_AI_MAX_PROMPT_CHARS", "12000"))
+    except ValueError:
+        max_chars = 12000
+    scan_json = json.dumps(results, indent=2)
+    if len(scan_json) > max_chars:
+        scan_json = scan_json[:max_chars] + "\n... [truncated]"
+    prompt = (
+        "You are a bug bounty vulnerability analyst. Analyze the JSON scan output and return:\n"
+        "1) prioritized findings by severity and exploitability\n"
+        "2) possible exploit paths\n"
+        "3) business impact for top findings\n"
+        "Keep it concise and actionable.\n\n"
+        f"Scan JSON:\n{scan_json}"
+    )
+
+    try:
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if anthropic_key:
+            analysis = call_anthropic(anthropic_key, prompt)
+        elif openai_key:
+            analysis = call_openai(openai_key, prompt)
+        else:
+            err("Missing API key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY")
+            return
+    except Exception as ex:
+        err(f"AI analysis failed: {ex}")
+        return
+
+    print(f"\n{analysis}\n")
+    if output_dir:
+        target = results.get("url", results.get("domain", "unknown_target"))
+        safe_target = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(target))
+        out_path = f"{output_dir}/ai_analysis_{safe_target}.txt"
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as f:
+            f.write(analysis + "\n")
+        ok(f"Saved → {out_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -669,6 +802,9 @@ def main():
   Write a bug bounty report:
     python bbhunter.py report
 
+  Analyze scan output with AI:
+    python bbhunter.py ai-analyze -f ./results/scan_example.com.json
+
   Save all output to a folder:
     python bbhunter.py recon -d example.com -o ./results
 """
@@ -695,6 +831,12 @@ def main():
                        help="Category: basic / bypass / blind / all (default: all)")
     p_pay.add_argument("--list", action="store_true", help="List all available payload types")
 
+    # ai-analyze
+    p_ai = sub.add_parser("ai-analyze", help="Analyze scan findings with Claude/GPT")
+    p_ai.add_argument("-f", "--file", help="Path to scan JSON results")
+    p_ai.add_argument("-u", "--url", help="Target URL to scan first (use with --auto)")
+    p_ai.add_argument("--auto", action="store_true", help="Auto use latest scan JSON or scan URL first")
+
     # report
     sub.add_parser("report", help="Interactive bug bounty report writer")
 
@@ -716,6 +858,9 @@ def main():
                 print(f"  {G}{vt:20s}{RST}  {DIM}[{cats_str}]{RST}  {total} payloads")
         else:
             run_payloads(args.vuln_type, args.category, out)
+
+    elif args.command == "ai-analyze":
+        run_ai_analyze(args.file, args.url, args.auto, out)
 
     elif args.command == "report":
         run_report(out)

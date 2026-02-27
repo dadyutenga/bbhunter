@@ -112,7 +112,27 @@
     xxe             XML External Entity
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  MODULE 4 — REPORT WRITER
+  MODULE 4 — AI ANALYZER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Analyze scan JSON with AI:
+    export ANTHROPIC_API_KEY=sk-ant-...
+    python bbhunter.py ai-analyze -f ./results/scan_example.com.json
+
+  Auto-analyze latest scan in output folder:
+    python bbhunter.py ai-analyze --auto -o ./results
+
+  Auto scan URL then analyze:
+    export OPENAI_API_KEY=sk-...
+    python bbhunter.py ai-analyze -u https://example.com --auto -o ./results
+
+  Options:
+    -f / --file        Path to scan JSON result file
+    -u / --url         URL to scan first (works with --auto)
+    --auto             Use latest scan JSON or run scan first with -u
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MODULE 5 — REPORT WRITER
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   Launch interactive report writer:
@@ -165,6 +185,7 @@
     python bbhunter.py recon --help
     python bbhunter.py scan --help
     python bbhunter.py payloads --help
+    python bbhunter.py ai-analyze --help
     python bbhunter.py report --help
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
