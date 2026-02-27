@@ -184,8 +184,6 @@ def crtsh_enum(domain):
     info(f"Querying crt.sh for *.{domain} ...")
     try:
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
         req = urllib.request.Request(url, headers={"User-Agent": "BBHunter/1.0"})
         with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
             if r.status != 200:
@@ -366,21 +364,25 @@ def generate_burp_requests(output_dir, results):
         sev = f.get("severity", "")
         title = f.get("title", "")
         detail = f.get("detail", "")
+        status_code = f.get("status_code")
 
         is_high_crit = sev in ("HIGH", "CRITICAL")
-        is_interesting_200 = "HTTP 200" in detail or ("accessible" in title.lower() and sev == "HIGH")
+        is_interesting_200 = (status_code == 200) or ("HTTP 200" in detail and sev == "HIGH")
         if not (is_high_crit or is_interesting_200):
             continue
 
         # Determine the path for the request
         path = "/"
-        if detail and detail.startswith("/"):
+        # Try structured path field first
+        if f.get("path"):
+            path = f["path"]
+        elif detail and detail.startswith("/"):
             path = detail.split()[0]
-        elif "path" in title.lower():
+        elif ":" in title:
             # Extract path from title like "Sensitive path accessible: /.env"
-            parts = title.split(":")
-            if len(parts) > 1:
-                path = parts[-1].strip().split()[0]
+            candidate = title.split(":")[-1].strip().split()[0]
+            if candidate.startswith("/"):
+                path = candidate
 
         safe_title = re.sub(r"[^a-zA-Z0-9._-]+", "_", title)[:60]
         fname = os.path.join(burp_dir, f"{i:03d}_{safe_title}.http")
@@ -634,12 +636,18 @@ def run_dirb(url, output_dir, wordlist_path=None, threads=40, status_filter="200
     if output_dir:
         netloc = urllib.parse.urlparse(url).netloc
         save_json(f"{output_dir}/dirb_{netloc}.json", results)
-        # Generate Burp requests for interesting 200 responses
+        # Generate Burp requests for sensitive 200 responses
+        sensitive_prefixes = ("/admin", "/config", "/backup", "/db", "/debug",
+                              "/install", "/internal", "/manage", "/monitor",
+                              "/panel", "/private", "/setup", "/phpmyadmin",
+                              "/graphql", "/rest", "/swagger", "/phpinfo")
         burp_results = {"url": url, "findings": []}
         for f in found:
             if f["status"] == 200:
+                is_sensitive = any(f["path"].startswith(p) for p in sensitive_prefixes)
+                sev = "HIGH" if is_sensitive else "LOW"
                 burp_results["findings"].append({
-                    "severity": "HIGH", "title": f"Dir found: {f['path']}",
+                    "severity": sev, "title": f"Dir found: {f['path']}",
                     "detail": f"HTTP 200  size={f['size']}b",
                 })
         if burp_results["findings"]:
