@@ -1,0 +1,221 @@
+{
+  "url": "https://windmarkinv.co.tz/",
+  "timestamp": "2026-02-27 14:17:06.156952",
+  "findings": [
+    {
+      "severity": "MEDIUM",
+      "title": "Missing security header: Strict-Transport-Security",
+      "detail": "Consider adding this header"
+    },
+    {
+      "severity": "MEDIUM",
+      "title": "Missing security header: Content-Security-Policy",
+      "detail": "Consider adding this header"
+    },
+    {
+      "severity": "MEDIUM",
+      "title": "Missing security header: X-Frame-Options",
+      "detail": "Consider adding this header"
+    },
+    {
+      "severity": "MEDIUM",
+      "title": "Missing security header: X-Content-Type-Options",
+      "detail": "Consider adding this header"
+    },
+    {
+      "severity": "MEDIUM",
+      "title": "Missing security header: Referrer-Policy",
+      "detail": "Consider adding this header"
+    },
+    {
+      "severity": "MEDIUM",
+      "title": "Missing security header: Permissions-Policy",
+      "detail": "Consider adding this header"
+    },
+    {
+      "severity": "MEDIUM",
+      "title": "Missing security header: X-XSS-Protection",
+      "detail": "Consider adding this header"
+    },
+    {
+      "severity": "INFO",
+      "title": "Technology disclosure: Server",
+      "detail": "nginx/1.24.0 (Ubuntu)"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /.git/config",
+      "detail": "HTTP 200  size=273b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /.env",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /.DS_Store",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /composer.json",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /package.json",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /yarn.lock",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /Dockerfile",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /docker-compose.yml",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /web.config",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /backup.zip",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /backup.sql",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /dump.sql",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /db.sql",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /admin/",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /administrator/",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /phpmyadmin/",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /api/v1/users",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /api/v1/admin",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /api/swagger",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /api/docs",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /swagger.json",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /swagger.yaml",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /openapi.json",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /actuator",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /actuator/env",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /actuator/health",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /actuator/mappings",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /.well-known/security.txt",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /robots.txt",
+      "detail": "HTTP 200  size=649b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /sitemap.xml",
+      "detail": "HTTP 200  size=1918b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /crossdomain.xml",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /clientaccesspolicy.xml",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /server-status",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /server-info",
+      "detail": "HTTP 200  size=4096b"
+    },
+    {
+      "severity": "HIGH",
+      "title": "Sensitive path accessible: /.bash_history",
+      "detail": "HTTP 200  size=4096b"
+    }
+  ]
+}

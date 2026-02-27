@@ -1,0 +1,24 @@
+{
+  "domain": "ditronics.co.tz",
+  "timestamp": "2026-02-27 14:15:32.003314",
+  "subdomains": [
+    {
+      "subdomain": "www.ditronics.co.tz",
+      "ip": "31.220.82.177",
+      "http": {
+        "url": "https://www.ditronics.co.tz",
+        "status": 200,
+        "server": "nginx/1.22.1"
+      }
+    },
+    {
+      "subdomain": "mail.ditronics.co.tz",
+      "ip": "31.220.82.177",
+      "http": {
+        "url": "https://mail.ditronics.co.tz",
+        "status": 200,
+        "server": "nginx/1.22.1"
+      }
+    }
+  ]
+}
