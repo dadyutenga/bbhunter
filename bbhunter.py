@@ -74,8 +74,13 @@ def save_json(path, data):
     ok(f"Saved → {path}")
 
 def call_openai(api_key, prompt):
+    try:
+        max_tokens = int(os.getenv("BBHUNTER_AI_MAX_TOKENS", "1200"))
+    except ValueError:
+        max_tokens = 1200
     payload = {
         "model": "gpt-4o-mini",
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     req = urllib.request.Request(
@@ -408,9 +413,13 @@ def run_ai_analyze(file_path, url, auto, output_dir):
 
     findings_count = len(results.get("findings", []))
     print(f"{M}[AI]{RST} Analyzing {findings_count} findings from {source}...")
+    try:
+        max_chars = int(os.getenv("BBHUNTER_AI_MAX_PROMPT_CHARS", "12000"))
+    except ValueError:
+        max_chars = 12000
     scan_json = json.dumps(results, indent=2)
-    if len(scan_json) > 12000:
-        scan_json = scan_json[:12000] + "\n... [truncated]"
+    if len(scan_json) > max_chars:
+        scan_json = scan_json[:max_chars] + "\n... [truncated]"
     prompt = (
         "You are a bug bounty vulnerability analyst. Analyze the JSON scan output and return:\n"
         "1) prioritized findings by severity and exploitability\n"
@@ -436,7 +445,7 @@ def run_ai_analyze(file_path, url, auto, output_dir):
 
     print(f"\n{analysis}\n")
     if output_dir:
-        target = results.get("url", results.get("domain", "target"))
+        target = results.get("url", results.get("domain", "unknown_target"))
         safe_target = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(target))
         out_path = f"{output_dir}/ai_analysis_{safe_target}.txt"
         Path(output_dir).mkdir(parents=True, exist_ok=True)
