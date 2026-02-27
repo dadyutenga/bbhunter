@@ -87,14 +87,22 @@ def call_openai(api_key, prompt):
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"OpenAI API HTTP {ex.code}: {body[:300]}") from ex
     return data["choices"][0]["message"]["content"].strip()
 
 def call_anthropic(api_key, prompt):
+    try:
+        max_tokens = int(os.getenv("BBHUNTER_AI_MAX_TOKENS", "1200"))
+    except ValueError:
+        max_tokens = 1200
     payload = {
         "model": "claude-3-5-haiku-latest",
-        "max_tokens": 1200,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     req = urllib.request.Request(
@@ -107,8 +115,12 @@ def call_anthropic(api_key, prompt):
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Anthropic API HTTP {ex.code}: {body[:300]}") from ex
     return "".join(part.get("text", "") for part in data.get("content", [])).strip()
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -360,7 +372,7 @@ def run_scan(url, output_dir):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  MODULE 2.5 — AI VULNERABILITY ANALYZER
+#  MODULE 4 — AI VULNERABILITY ANALYZER
 # ─────────────────────────────────────────────────────────────────────────
 def run_ai_analyze(file_path, url, auto, output_dir):
     section("AI ANALYZE")
@@ -396,13 +408,16 @@ def run_ai_analyze(file_path, url, auto, output_dir):
 
     findings_count = len(results.get("findings", []))
     print(f"{M}[AI]{RST} Analyzing {findings_count} findings from {source}...")
+    scan_json = json.dumps(results, indent=2)
+    if len(scan_json) > 12000:
+        scan_json = scan_json[:12000] + "\n... [truncated]"
     prompt = (
         "You are a bug bounty vulnerability analyst. Analyze the JSON scan output and return:\n"
         "1) prioritized findings by severity and exploitability\n"
         "2) possible exploit paths\n"
         "3) business impact for top findings\n"
         "Keep it concise and actionable.\n\n"
-        f"Scan JSON:\n{json.dumps(results, indent=2)}"
+        f"Scan JSON:\n{scan_json}"
     )
 
     try:
