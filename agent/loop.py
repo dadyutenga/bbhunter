@@ -1,12 +1,34 @@
 """LLM tool-calling loop for BBHunter agent mode."""
 
 import json
+from typing import TYPE_CHECKING
 
 from agent.context import build_system_prompt
 from memory.db import load_history, save_message
-from providers.anthropic import call_claude
 from tools.executor import execute_tool
 from tools.registry import TOOLS
+
+if TYPE_CHECKING:
+    from ai.connector_manager import ConnectorManager
+
+# Module-level reference to the ConnectorManager singleton.
+# Set by bbhunter.py at startup via `set_connector_manager()`.
+_connector_manager: "ConnectorManager | None" = None
+
+
+def set_connector_manager(manager: "ConnectorManager") -> None:
+    """Inject the ConnectorManager so the agent loop can call any provider."""
+    global _connector_manager
+    _connector_manager = manager
+
+
+def _get_manager() -> "ConnectorManager":
+    if _connector_manager is None:
+        raise RuntimeError(
+            "No ConnectorManager configured. "
+            "Run BBHunter with provider selection first."
+        )
+    return _connector_manager
 
 
 def _extract_text(content_blocks):
@@ -24,7 +46,10 @@ def run_agent(user_message: str, session_id: str, verbose: bool = True) -> str:
     """
     Run the BBHunter tool-use loop.
     Iterates until the model returns a final text response.
+    Uses whichever AI provider is currently active via the ConnectorManager.
     """
+    manager = _get_manager()
+
     history = load_history(session_id)
     history.append({"role": "user", "content": user_message})
     save_message(session_id, "user", user_message)
@@ -34,7 +59,7 @@ def run_agent(user_message: str, session_id: str, verbose: bool = True) -> str:
 
     while iteration < max_iterations:
         iteration += 1
-        response = call_claude(
+        response = manager.chat(
             system=build_system_prompt(),
             messages=history,
             tools=TOOLS,

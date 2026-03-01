@@ -20,6 +20,23 @@ from modules.ai_analyze import run_ai_analyze
 from modules.report import run_report
 from modules.utils import section, err, G, DIM
 
+from ai.connector_manager import ConnectorManager
+from ai.model_registry import print_models_table
+from agent.loop import set_connector_manager
+
+
+# Global ConnectorManager singleton
+_manager: ConnectorManager | None = None
+
+
+def _get_manager() -> ConnectorManager:
+    """Get or create the ConnectorManager and auto-connect providers."""
+    global _manager
+    if _manager is None:
+        _manager = ConnectorManager()
+        _manager.auto_connect()
+    return _manager
+
 
 def _print_banner():
     """Print unicode banner with a safe fallback on non-UTF terminals."""
@@ -34,9 +51,22 @@ def _run_interactive_agent():
     from agent.loop import run_agent
 
     _print_banner()
+
+    manager = _get_manager()
+    set_connector_manager(manager)
+
+    # If no provider connected, run startup selection
+    if not manager.get_active():
+        if not manager.run_startup_selection():
+            print("[*] No AI provider active. AI commands will be unavailable.")
+
     session_id = str(uuid.uuid4())[:8]
-    print(f"BBHunter AI v2.0 | Session: {session_id}")
-    print("Type a target or task. Commands: exit, new")
+    active = manager.get_active()
+    provider_info = ""
+    if active:
+        provider_info = f" | Provider: {manager.active_provider_name}/{manager.active_model}"
+    print(f"BBHunter AI v2.0 | Session: {session_id}{provider_info}")
+    print("Type a target or task. Commands: /connectors, /models, /use <provider> <model>, exit, new")
 
     while True:
         try:
@@ -53,6 +83,57 @@ def _run_interactive_agent():
         if user_input.lower() == "new":
             session_id = str(uuid.uuid4())[:8]
             print(f"New session: {session_id}")
+            continue
+
+        # ── slash commands ────────────────────────────────────────
+        if user_input.lower() == "/connectors":
+            manager.print_connectors()
+            continue
+
+        if user_input.lower() == "/models":
+            print_models_table(manager)
+            continue
+
+        if user_input.lower().startswith("/use "):
+            parts = user_input.split()
+            if len(parts) < 2:
+                print("Usage: /use <provider> [model]")
+                continue
+            prov = parts[1]
+            model = parts[2] if len(parts) > 2 else ""
+            manager.set_active(prov, model)
+            continue
+
+        if user_input.lower().startswith("/connect "):
+            parts = user_input.split()
+            if len(parts) < 2:
+                print("Usage: /connect <provider>")
+                continue
+            prov = parts[1]
+            if prov in ("claude", "openai"):
+                try:
+                    key = input(f"Enter {prov} API key: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    continue
+                manager.connect(prov, api_key=key)
+            elif prov == "github_copilot":
+                manager.connect("github_copilot")
+            elif prov == "ollama":
+                url = input("Ollama URL [http://localhost:11434]: ").strip() or "http://localhost:11434"
+                manager.connect("ollama", base_url=url)
+            else:
+                print(f"[!] Unknown provider: {prov}")
+            continue
+
+        if user_input.lower().startswith("/disconnect "):
+            parts = user_input.split()
+            if len(parts) >= 2:
+                manager.disconnect(parts[1])
+            continue
+
+        # ── AI agent request ──────────────────────────────────────
+        if not manager.get_active():
+            print("[!] No AI provider connected. Use /connectors to set one up.")
             continue
 
         try:
