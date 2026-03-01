@@ -66,7 +66,7 @@ def _run_interactive_agent():
     if active:
         provider_info = f" | Provider: {manager.active_provider_name}/{manager.active_model}"
     print(f"BBHunter AI v2.0 | Session: {session_id}{provider_info}")
-    print("Type a target or task. Commands: /connectors, /models, /use <provider> <model>, exit, new")
+    print("Type a target or task. Commands: /connectors, /models, /use, /copilot auth, exit, new")
 
     while True:
         try:
@@ -91,7 +91,8 @@ def _run_interactive_agent():
             continue
 
         if user_input.lower() == "/models":
-            print_models_table(manager)
+            from ai.model_registry import interactive_model_select
+            interactive_model_select(manager)
             continue
 
         if user_input.lower().startswith("/use "):
@@ -123,6 +124,12 @@ def _run_interactive_agent():
                 manager.connect("ollama", base_url=url)
             else:
                 print(f"[!] Unknown provider: {prov}")
+            continue
+
+        if user_input.lower() in ("/copilot auth", "/copilot login"):
+            # Device flow to unlock all Copilot models
+            if manager.connect("github_copilot", device_flow=True):
+                manager.set_active("github_copilot", "gpt-4o")
             continue
 
         if user_input.lower().startswith("/disconnect "):
