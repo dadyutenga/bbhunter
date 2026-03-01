@@ -7,6 +7,9 @@
 """
 
 import argparse
+import os
+import sys
+import uuid
 
 from modules.utils import BANNER, BOLD, RST
 from modules.recon import run_recon
@@ -15,14 +18,77 @@ from modules.dirb import run_dirb
 from modules.payloads import PAYLOADS, run_payloads
 from modules.ai_analyze import run_ai_analyze
 from modules.report import run_report
-from modules.utils import section, G, DIM
+from modules.utils import section, err, G, DIM
 
 
-# ─────────────────────────────────────────────────────────────────────────
+def _print_banner():
+    """Print unicode banner with a safe fallback on non-UTF terminals."""
+    try:
+        print(BANNER)
+    except UnicodeEncodeError:
+        print("BBHunter - Bug Bounty Hunter CLI")
+
+
+def _run_interactive_agent():
+    """Start interactive AI agent session in terminal."""
+    from agent.loop import run_agent
+
+    _print_banner()
+    session_id = str(uuid.uuid4())[:8]
+    print(f"BBHunter AI v2.0 | Session: {session_id}")
+    print("Type a target or task. Commands: exit, new")
+
+    while True:
+        try:
+            user_input = input("\nYou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye.")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() == "exit":
+            print("Bye.")
+            break
+        if user_input.lower() == "new":
+            session_id = str(uuid.uuid4())[:8]
+            print(f"New session: {session_id}")
+            continue
+
+        try:
+            response = run_agent(user_input, session_id, verbose=True)
+            print(f"\nBBHunter AI>\n{response}")
+        except Exception as ex:
+            err(f"Agent error: {ex}")
+
+
+def _run_telegram_mode():
+    """Run Telegram bot mode if optional channel module is installed."""
+    try:
+        from config.config import load_config as load_agent_config
+        from channels.telegram import run_telegram_bot
+    except Exception as ex:
+        err(f"Telegram mode unavailable: {ex}")
+        raise SystemExit(1)
+
+    cfg = load_agent_config()
+    token = cfg.get("telegram", {}).get("token") or os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        err("No Telegram token found. Set ~/.bbhunter/config.json or TELEGRAM_BOT_TOKEN.")
+        raise SystemExit(1)
+    run_telegram_bot(token)
 #  CLI ENTRYPOINT
 # ─────────────────────────────────────────────────────────────────────────
 def main():
-    print(BANNER)
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--telegram":
+        _run_telegram_mode()
+        return
+    if not argv or argv[0] in ("-i", "--interactive", "agent"):
+        _run_interactive_agent()
+        return
+
+    _print_banner()
 
     parser = argparse.ArgumentParser(
         prog="bbhunter",
@@ -109,7 +175,7 @@ def main():
     # report
     sub.add_parser("report", help="Interactive bug bounty report writer")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     out  = args.output
 
     if args.command == "recon":
