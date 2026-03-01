@@ -39,7 +39,7 @@ def print_models_table(manager: ConnectorManager) -> None:
     active_provider = manager.active_provider_name
     active_model = manager.active_model
 
-    # Check if copilot is tier-1 (basic)
+    # Check copilot tier
     copilot = manager.providers.get("github_copilot")
     copilot_basic = copilot and hasattr(copilot, "_tier") and copilot._tier == 1
 
@@ -57,10 +57,10 @@ def print_models_table(manager: ConnectorManager) -> None:
                 if provider._tier == 2:
                     tier_info = f"  {G}full access{RST}"
                 else:
-                    tier_info = f"  {Y}GPT only — /copilot auth for all models{RST}"
+                    tier_info = f"  {Y}GPT only{RST}"
             print(f"\n  {G}■{RST} {BOLD}{nice}{RST}  {DIM}(connected){RST}{tier_info}")
 
-            # Group by vendor if available
+            # Group by vendor
             cur_vendor = ""
             for m in models:
                 mid = m["id"]
@@ -73,17 +73,14 @@ def print_models_table(manager: ConnectorManager) -> None:
                 marker = ""
                 if name == active_provider and mid == active_model:
                     marker = f"  {C}◀ active{RST}"
-                elif mid == _recommend(name):
-                    marker = f"  {DIM}(recommended){RST}"
                 print(f"    {DIM}{idx:>2}.{RST} {mid:<32s} {mname}{marker}")
                 idx += 1
         else:
             print(f"\n  {R}■{RST} {BOLD}{nice}{RST}  {DIM}(not connected — /connect {name}){RST}")
 
     print(f"\n  {'─' * 60}")
-    print(f"  {DIM}Quick switch: enter a number, or type /use <provider> <model>{RST}")
     if copilot_basic:
-        print(f"  {DIM}Unlock Claude/Gemini/o-series: /copilot auth{RST}")
+        print(f"  {Y}Unlock Claude & Gemini: /copilot auth{RST}")
     print()
 
 
@@ -98,7 +95,7 @@ def interactive_model_select(manager: ConnectorManager) -> None:
         return
 
     try:
-        choice = input(f"  {DIM}Select model #{RST} (or Enter to keep current): ").strip()
+        choice = input(f"  Select model # (Enter to keep current): ").strip()
     except (EOFError, KeyboardInterrupt):
         return
 
@@ -118,17 +115,7 @@ def interactive_model_select(manager: ConnectorManager) -> None:
             if choice == it["id"]:
                 manager.set_active(it["provider"], it["id"])
                 return
-        print(f"[!] Unknown model: {choice}")
-
-
-def _recommend(provider_name: str) -> str:
-    """Return the recommended model id per provider."""
-    return {
-        "github_copilot": "gpt-4o",
-        "claude": "claude-3-5-haiku-latest",
-        "openai": "gpt-4o",
-        "ollama": "llama3",
-    }.get(provider_name, "")
+        print(f"[!] Unknown selection: {choice}. Enter a number or model ID.")
 
 
 def _nice_name(name: str) -> str:

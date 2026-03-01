@@ -2,24 +2,23 @@
 
 Two authentication tiers:
 ─────────────────────────
-Tier 1 — "Basic" (copilot-cli / env token, scopes: read:user, repo …)
-  •  Uses  /copilot_internal/user  →  api.individual.githubcopilot.com
-  •  Only GPT models work (gpt-4o, gpt-4o-mini, gpt-3.5-turbo)
+Tier 1 — "Basic" (copilot-cli credential, no `copilot` OAuth scope)
+  •  Reads token from Windows Credential Manager / env / gh cli
+  •  GPT models only: gpt-4o, gpt-4o-mini, gpt-3.5-turbo
 
-Tier 2 — "Full" (device-flow token WITH `copilot` scope)
-  •  Exchanges token via  /copilot_internal/v2/token  →  short-lived JWT
-  •  Calls  api.githubcopilot.com  →  ALL models (Claude, Gemini, o-series, GPT)
+Tier 2 — "Full" (device-flow token with `copilot` OAuth scope)
+  •  User runs /copilot auth → GitHub Device Flow via VS Code OAuth app
+  •  Token saved to ~/.bbhunter/copilot_token.json
+  •  All models: GPT + Claude Sonnet 4 + Gemini 2.5 Pro + GPT-4.1
 
-On first /connect the provider tries Tier 1 automatically.
-If the user runs  `/copilot auth`  we do a GitHub Device Flow requesting the
-`copilot` scope, unlock Tier 2, and save the token for next time.
+Both tiers use the same endpoint:
+  api.individual.githubcopilot.com/chat/completions  (Bearer token)
 """
 
 import ctypes
 import ctypes.wintypes
 import json
 import os
-import re
 import subprocess
 import time
 import urllib.error
@@ -31,42 +30,32 @@ from ai.base_provider import BaseProvider
 
 _GITHUB_API = "https://api.github.com"
 _GITHUB_BASE = "https://github.com"
-_CLIENT_ID = "Ov23ctDVkRmgkPke0Mmm"          # Copilot CLI OAuth app
-_FULL_CHAT_URL = "https://api.githubcopilot.com/chat/completions"
+# VS Code's OAuth app — needed for device flow with `copilot` scope
+_VSCODE_CLIENT_ID = "01ab8ac9400c4e429b23"
 
 # ── model metadata ────────────────────────────────────────────────────
-# Tier-2 (full-scope) model catalogue — updated March 2026
-_FULL_MODELS = [
+# Tier-2 models (copilot scope required for non-GPT models)
+_TIER2_MODELS = [
     # OpenAI GPT
-    {"id": "gpt-4o",                "name": "GPT-4o",                  "vendor": "OpenAI"},
-    {"id": "gpt-4o-mini",           "name": "GPT-4o Mini",             "vendor": "OpenAI"},
-    {"id": "gpt-4.1",              "name": "GPT-4.1",                 "vendor": "OpenAI"},
-    {"id": "gpt-4.1-mini",        "name": "GPT-4.1 Mini",            "vendor": "OpenAI"},
-    {"id": "gpt-4.1-nano",        "name": "GPT-4.1 Nano",            "vendor": "OpenAI"},
-    # OpenAI o-series
-    {"id": "o3-mini",              "name": "o3-mini",                  "vendor": "OpenAI"},
-    {"id": "o4-mini",              "name": "o4-mini",                  "vendor": "OpenAI"},
+    {"id": "gpt-4o",           "name": "GPT-4o",           "vendor": "OpenAI"},
+    {"id": "gpt-4o-mini",      "name": "GPT-4o Mini",      "vendor": "OpenAI"},
+    {"id": "gpt-4.1",          "name": "GPT-4.1",          "vendor": "OpenAI"},
+    {"id": "gpt-4",            "name": "GPT-4",            "vendor": "OpenAI"},
+    {"id": "gpt-3.5-turbo",    "name": "GPT-3.5 Turbo",    "vendor": "OpenAI"},
     # Anthropic Claude
-    {"id": "claude-3.5-sonnet",    "name": "Claude 3.5 Sonnet",       "vendor": "Anthropic"},
-    {"id": "claude-3.7-sonnet",    "name": "Claude 3.7 Sonnet",       "vendor": "Anthropic"},
-    {"id": "claude-3.7-sonnet-thought", "name": "Claude 3.7 Sonnet (Thinking)", "vendor": "Anthropic"},
-    {"id": "claude-sonnet-4",      "name": "Claude Sonnet 4",         "vendor": "Anthropic"},
+    {"id": "claude-sonnet-4",  "name": "Claude Sonnet 4",   "vendor": "Anthropic"},
     # Google Gemini
-    {"id": "gemini-2.0-flash-001", "name": "Gemini 2.0 Flash",        "vendor": "Google"},
-    {"id": "gemini-2.5-pro",       "name": "Gemini 2.5 Pro",          "vendor": "Google"},
+    {"id": "gemini-2.5-pro",   "name": "Gemini 2.5 Pro",    "vendor": "Google"},
 ]
 
-# Tier-1 (basic-scope) fallback models
-_BASIC_MODELS = [
+# Tier-1 models (basic copilot-cli token)
+_TIER1_MODELS = [
     {"id": "gpt-4o",         "name": "GPT-4o",         "vendor": "OpenAI"},
     {"id": "gpt-4o-mini",    "name": "GPT-4o Mini",    "vendor": "OpenAI"},
     {"id": "gpt-3.5-turbo",  "name": "GPT-3.5 Turbo",  "vendor": "OpenAI"},
 ]
 
-_DATED_RE = re.compile(r"-\d{4}(-\d{2}){0,2}$")
-
-# Preferred display order
-_MODEL_RANK = {m["id"]: i for i, m in enumerate(_FULL_MODELS)}
+_MODEL_RANK = {m["id"]: i for i, m in enumerate(_TIER2_MODELS)}
 
 # Token cache path
 _TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".bbhunter", "copilot_token.json")
@@ -79,10 +68,8 @@ class GitHubCopilotProvider(BaseProvider):
     requires_auth = True
 
     def __init__(self) -> None:
-        self._oauth_token: str | None = None      # long-lived GitHub OAuth token
-        self._copilot_token: str | None = None     # short-lived Copilot API JWT (Tier 2)
-        self._copilot_token_exp: float = 0.0
-        self._api_url: str = ""                    # Tier 1 endpoint
+        self._oauth_token: str | None = None
+        self._api_url: str = ""
         self._copilot_plan: str = ""
         self._tier: int = 0                        # 1 = basic, 2 = full
         self._cached_models: list[dict] | None = None
@@ -99,28 +86,27 @@ class GitHubCopilotProvider(BaseProvider):
         tok = kwargs.get("token") or kwargs.get("oauth_token")
         if tok:
             self._oauth_token = tok
-            return self._try_all_tiers()
+            return self._try_connect()
 
         # 1. Saved full-scope token from ~/.bbhunter/copilot_token.json
         saved = self._load_saved_token()
         if saved:
             self._oauth_token = saved
-            if self._try_all_tiers():
+            if self._try_connect():
                 return True
 
         # 2. Copilot CLI credential (Windows Credential Manager)
-        print("[*] Checking Copilot CLI credentials...")
         cred = _read_windows_credential("copilot-cli/https://github.com")
         if cred:
             self._oauth_token = cred
-            if self._try_all_tiers():
+            if self._try_connect():
                 return True
 
         # 3. Git credential
         cred = _read_windows_credential("git:https://github.com")
         if cred:
             self._oauth_token = cred
-            if self._try_all_tiers():
+            if self._try_connect():
                 return True
 
         # 4. Environment variables
@@ -128,17 +114,16 @@ class GitHubCopilotProvider(BaseProvider):
             tok = os.getenv(env, "")
             if tok:
                 self._oauth_token = tok
-                if self._try_all_tiers():
+                if self._try_connect():
                     return True
 
         # 5. gh CLI
         gh_tok = self._try_gh_cli_token()
         if gh_tok:
             self._oauth_token = gh_tok
-            if self._try_all_tiers():
+            if self._try_connect():
                 return True
 
-        print("[!] Could not authenticate with GitHub Copilot.")
         self._oauth_token = None
         return False
 
@@ -149,48 +134,11 @@ class GitHubCopilotProvider(BaseProvider):
     def list_models(self) -> list[dict]:
         if self._cached_models is not None:
             return self._cached_models
-
         if self._tier == 2:
-            # Full-scope: return catalogue + anything extra from API
-            models = list(_FULL_MODELS)
-            self._cached_models = models
-            return models
-
-        if self._tier == 1:
-            # Basic-scope: try /models endpoint, filter dated IDs
-            models = self._fetch_api_models()
-            if models:
-                self._cached_models = models
-                return models
-            return list(_BASIC_MODELS)
-
-        return list(_BASIC_MODELS)
-
-    def _fetch_api_models(self) -> list[dict]:
-        """Fetch model list from Tier-1 API and filter dated variants."""
-        if not self._api_url or not self._oauth_token:
-            return []
-        try:
-            req = urllib.request.Request(
-                f"{self._api_url}/models",
-                headers={
-                    "Authorization": f"Bearer {self._oauth_token}",
-                    "Accept": "application/json",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode())
-            models = []
-            for m in data.get("data", []):
-                mid = m.get("id", "")
-                if _DATED_RE.search(mid):
-                    continue
-                nice = mid.replace("gpt-", "GPT-").replace("-turbo", " Turbo").replace("-mini", " Mini")
-                models.append({"id": mid, "name": nice, "vendor": "OpenAI"})
-            models.sort(key=lambda m: (_MODEL_RANK.get(m["id"], 999), m["id"]))
-            return models
-        except Exception:
-            return []
+            self._cached_models = list(_TIER2_MODELS)
+        else:
+            self._cached_models = list(_TIER1_MODELS)
+        return self._cached_models
 
     # ── chat ──────────────────────────────────────────────────────
     def chat(
@@ -220,20 +168,12 @@ class GitHubCopilotProvider(BaseProvider):
         if tools:
             payload["tools"] = self._convert_tools(tools)
 
-        # Pick the right auth + endpoint for the tier
-        if self._tier == 2:
-            self._ensure_copilot_jwt()
-            url = _FULL_CHAT_URL
-            auth = f"Bearer {self._copilot_token}"
-        else:
-            url = f"{self._api_url}/chat/completions"
-            auth = f"Bearer {self._oauth_token}"
-
+        url = f"{self._api_url}/chat/completions"
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
             url, data=data,
             headers={
-                "Authorization": auth,
+                "Authorization": f"Bearer {self._oauth_token}",
                 "Content-Type": "application/json",
                 "Editor-Version": "vscode/1.96.0",
                 "Copilot-Integration-Id": "vscode-chat",
@@ -247,77 +187,42 @@ class GitHubCopilotProvider(BaseProvider):
                 result = json.loads(resp.read().decode())
         except urllib.error.HTTPError as ex:
             body = ex.read().decode("utf-8", errors="ignore")
-            # If tier-2 401, refresh JWT once
-            if ex.code == 401 and self._tier == 2:
-                print("[*] Copilot token expired, refreshing...")
-                if self._exchange_copilot_token():
-                    return self.chat(messages, model, system, tools)
             raise RuntimeError(f"Copilot API HTTP {ex.code}: {body[:400]}") from ex
 
         return self._normalise_response(result)
 
-    # ── tier detection ────────────────────────────────────────────
-    def _try_all_tiers(self) -> bool:
-        """Try Tier 2 first (full), fall back to Tier 1 (basic)."""
-        if self._try_tier2():
-            return True
-        return self._try_tier1()
-
-    def _try_tier2(self) -> bool:
-        """Try token exchange → if it works, we have the copilot scope."""
+    # ── connection + tier detection ───────────────────────────────
+    def _try_connect(self) -> bool:
+        """Validate token and detect tier."""
         if not self._oauth_token:
             return False
-        if self._exchange_copilot_token():
-            self._tier = 2
-            self._cached_models = None
-            # Also grab the user endpoint info
-            self._validate_copilot_user()
-            print(f"[+] Copilot Tier 2 (full) — all models unlocked!")
-            return True
-        return False
-
-    def _try_tier1(self) -> bool:
-        """Validate via /copilot_internal/user for basic GPT access."""
-        if not self._oauth_token:
+        if not self._validate_copilot_user():
             return False
-        if self._validate_copilot_user():
-            self._tier = 1
-            self._cached_models = None
-            print(f"    Tier 1 (basic) — GPT models only. Run /copilot auth to unlock all models.")
-            return True
-        return False
+        tier = self._detect_tier()
+        self._tier = tier
+        self._cached_models = None
+        if tier == 2:
+            print(f"    Tier 2 (full) — Claude, Gemini & all GPT models available!")
+        else:
+            print(f"    Tier 1 (basic) — GPT models only. Run /copilot auth to unlock Claude & Gemini.")
+        return True
 
-    # ── token exchange (Tier 2) ───────────────────────────────────
-    def _exchange_copilot_token(self) -> bool:
-        """Exchange GitHub OAuth token for short-lived Copilot API JWT."""
+    def _detect_tier(self) -> int:
+        """Check if the token has the `copilot` OAuth scope."""
         if not self._oauth_token:
-            return False
+            return 1
         try:
             req = urllib.request.Request(
-                f"{_GITHUB_API}/copilot_internal/v2/token",
-                headers={
-                    "Authorization": f"token {self._oauth_token}",
-                    "Accept": "application/json",
-                },
+                f"{_GITHUB_API}/user",
+                headers={"Authorization": f"token {self._oauth_token}"},
             )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode())
-            token = data.get("token")
-            if token:
-                exp = data.get("expires_at", 0)
-                self._copilot_token = token
-                self._copilot_token_exp = exp if isinstance(exp, (int, float)) else 0
-                return True
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                scopes = resp.headers.get("X-OAuth-Scopes", "")
+            if "copilot" in scopes.lower():
+                return 2
         except Exception:
             pass
-        return False
-
-    def _ensure_copilot_jwt(self) -> None:
-        """Refresh the short-lived JWT if it's expired or missing."""
-        if self._copilot_token and self._copilot_token_exp > time.time() + 60:
-            return
-        if not self._exchange_copilot_token():
-            raise RuntimeError("Failed to refresh Copilot API token.")
+        return 1
 
     # ── validate /copilot_internal/user ───────────────────────────
     def _validate_copilot_user(self) -> bool:
@@ -342,11 +247,7 @@ class GitHubCopilotProvider(BaseProvider):
             chat_ok = data.get("chat_enabled", False)
             print(f"[+] Copilot connected! Plan: {self._copilot_plan} | Chat: {chat_ok}")
             return True
-        except urllib.error.HTTPError as ex:
-            if ex.code == 401:
-                print("[!] Token not valid for Copilot.")
-            elif ex.code == 404:
-                print("[!] No Copilot subscription for this account.")
+        except urllib.error.HTTPError:
             return False
         except Exception:
             return False
@@ -354,20 +255,19 @@ class GitHubCopilotProvider(BaseProvider):
     # ── GitHub Device Flow (interactive) ──────────────────────────
     def _device_flow_login(self) -> bool:
         """
-        Run GitHub Device Flow with `copilot` scope.
-        The user opens a URL, enters a code, and we get a token
-        that can access ALL Copilot models (Claude, Gemini, etc.).
+        Run GitHub Device Flow with VS Code's OAuth app requesting `copilot` scope.
+        Unlocks Claude Sonnet 4, Gemini 2.5 Pro, and additional GPT models.
         """
         print()
         print("[*] Starting GitHub Device Flow to unlock full Copilot access...")
-        print("    (This gives access to Claude, Gemini, o-series and all GPT models)")
+        print("    This gives access to Claude Sonnet 4, Gemini 2.5 Pro & more.")
         print()
 
         # Step 1: Request device code
         try:
             body = urllib.parse.urlencode({
-                "client_id": _CLIENT_ID,
-                "scope": "read:user copilot",
+                "client_id": _VSCODE_CLIENT_ID,
+                "scope": "user:email copilot",
             }).encode()
             req = urllib.request.Request(
                 f"{_GITHUB_BASE}/login/device/code",
@@ -401,7 +301,7 @@ class GitHubCopilotProvider(BaseProvider):
                 time.sleep(interval)
                 try:
                     body = urllib.parse.urlencode({
-                        "client_id": _CLIENT_ID,
+                        "client_id": _VSCODE_CLIENT_ID,
                         "device_code": device_code,
                         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     }).encode()
@@ -420,13 +320,13 @@ class GitHubCopilotProvider(BaseProvider):
                         interval = result.get("interval", interval + 5)
                         continue
                     elif error == "expired_token":
-                        print("[!] Authorization expired. Try again.")
+                        print("\n[!] Authorization expired. Try again.")
                         return False
                     elif error == "access_denied":
-                        print("[!] Authorization denied.")
+                        print("\n[!] Authorization denied.")
                         return False
                     elif error:
-                        print(f"[!] OAuth error: {error}")
+                        print(f"\n[!] OAuth error: {error}")
                         return False
 
                     access_token = result.get("access_token", "")
@@ -434,16 +334,16 @@ class GitHubCopilotProvider(BaseProvider):
                         print(f"\n[+] Authorization successful!")
                         self._oauth_token = access_token
                         self._save_token(access_token)
-                        return self._try_all_tiers()
+                        return self._try_connect()
 
                 except Exception as ex:
-                    print(f"[!] Polling error: {ex}")
+                    print(f"\n[!] Polling error: {ex}")
                     return False
         except KeyboardInterrupt:
             print("\n[*] Authorization cancelled.")
             return False
 
-        print("[!] Timed out waiting for authorization.")
+        print("\n[!] Timed out waiting for authorization.")
         return False
 
     # ── token persistence ─────────────────────────────────────────
@@ -475,7 +375,6 @@ class GitHubCopilotProvider(BaseProvider):
             )
             tok = r.stdout.strip()
             if tok:
-                print("[+] Got token from gh CLI")
                 return tok
         except (FileNotFoundError, subprocess.CalledProcessError):
             pass
@@ -633,6 +532,5 @@ def _read_windows_credential(target_name: str) -> str | None:
         advapi32.CredFree(pcreds)
         return result
 
-    except Exception as ex:
-        print(f"[!] Could not read Windows credentials: {ex}")
+    except Exception:
         return None

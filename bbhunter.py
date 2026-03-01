@@ -127,15 +127,24 @@ def _run_interactive_agent():
             continue
 
         if user_input.lower() in ("/copilot auth", "/copilot login"):
-            # Device flow to unlock all Copilot models
+            # Device flow to unlock all Copilot models (Claude, Gemini, etc.)
             if manager.connect("github_copilot", device_flow=True):
-                manager.set_active("github_copilot", "gpt-4o")
+                manager.set_active("github_copilot", "claude-sonnet-4")
+            continue
+
+        if user_input.lower().startswith("/copilot"):
+            print("[!] Unknown copilot command. Available: /copilot auth")
             continue
 
         if user_input.lower().startswith("/disconnect "):
             parts = user_input.split()
             if len(parts) >= 2:
                 manager.disconnect(parts[1])
+            continue
+
+        if user_input.startswith("/"):
+            print(f"[!] Unknown command: {user_input.split()[0]}")
+            print("    Available: /connectors, /models, /use, /copilot auth, /connect, /disconnect")
             continue
 
         # ── AI agent request ──────────────────────────────────────
