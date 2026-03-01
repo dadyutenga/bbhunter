@@ -24,10 +24,17 @@ _GITHUB_API = "https://api.github.com"
 
 # Models dynamically fetched from the API; these are fallback defaults
 _DEFAULT_MODELS = [
-    {"id": "gpt-4o", "name": "GPT-4o (Copilot)"},
-    {"id": "gpt-4o-mini", "name": "GPT-4o Mini (Copilot)"},
-    {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo (Copilot)"},
+    {"id": "gpt-4o", "name": "GPT-4o"},
+    {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+    {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
 ]
+
+# Dated / snapshot IDs to hide (users should use the stable alias)
+# Matches -YYYY-MM-DD or -MMDD suffixes
+_DATED_MODEL_RE = __import__("re").compile(r"-\d{4}(-\d{2}){0,2}$")
+
+# Preferred display order (first = best)
+_MODEL_RANK = {"gpt-4o": 0, "gpt-4o-mini": 1, "gpt-3.5-turbo": 2}
 
 
 class GitHubCopilotProvider(BaseProvider):
@@ -104,7 +111,7 @@ class GitHubCopilotProvider(BaseProvider):
         if not self.is_connected():
             return list(_DEFAULT_MODELS)
 
-        # Fetch from API
+        # Fetch from API and filter out dated snapshot IDs
         try:
             req = urllib.request.Request(
                 f"{self._api_url}/models",
@@ -118,7 +125,13 @@ class GitHubCopilotProvider(BaseProvider):
             models = []
             for m in data.get("data", []):
                 mid = m.get("id", "")
-                models.append({"id": mid, "name": f"{mid} (Copilot)"})
+                # Skip dated snapshot variants (e.g. gpt-4o-2024-11-20)
+                if _DATED_MODEL_RE.search(mid):
+                    continue
+                nice = mid.replace("gpt-", "GPT-").replace("-turbo", " Turbo").replace("-mini", " Mini")
+                models.append({"id": mid, "name": nice})
+            # Sort: known models first by rank, unknowns alphabetically at the end
+            models.sort(key=lambda m: (_MODEL_RANK.get(m["id"], 999), m["id"]))
             if models:
                 self._cached_models = models
                 return models

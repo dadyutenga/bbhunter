@@ -24,36 +24,47 @@ def list_all_models(manager: ConnectorManager) -> list[dict]:
 
 def print_models_table(manager: ConnectorManager) -> None:
     """Pretty-print the /models table to stdout."""
-    from modules.utils import BOLD, RST, G, R, DIM
+    from modules.utils import BOLD, RST, G, R, DIM, Y
+
+    active_provider = manager.active_provider_name
+    active_model = manager.active_model
 
     print()
-    print(f"{BOLD}┌──────────────────────────────────────────────────┐{RST}")
-    print(f"{BOLD}│  AVAILABLE MODELS                                │{RST}")
-    print(f"{BOLD}├──────────────────────┬───────────────────────────┤{RST}")
-    print(f"{BOLD}│  Provider            │  Models                   │{RST}")
-    print(f"{BOLD}├──────────────────────┼───────────────────────────┤{RST}")
+    print(f"{BOLD}  AVAILABLE MODELS{RST}")
+    print(f"  {'─' * 50}")
 
+    idx = 1
     for name, provider in manager.providers.items():
+        nice = _nice_name(name)
         if provider.is_connected():
             models = provider.list_models()
-            model_ids = ", ".join(m["id"] for m in models[:4])
-            if len(models) > 4:
-                model_ids += f" +{len(models)-4} more"
-            status = f"{G}✅{RST}"
-            nice_name = _nice_name(name)
-            print(f"│  {nice_name:<16s} {status} │  {model_ids:<25s} │")
+            print(f"\n  {G}■{RST} {BOLD}{nice}{RST}  {DIM}(connected){RST}")
+            for m in models:
+                mid = m["id"]
+                mname = m.get("name", mid)
+                marker = ""
+                if name == active_provider and mid == active_model:
+                    marker = f"  {Y}◀ active{RST}"
+                elif mid == _recommend(name):
+                    marker = f"  {DIM}(recommended){RST}"
+                print(f"    {DIM}{idx}.{RST} {mid:<28s} {mname}{marker}")
+                idx += 1
         else:
-            status = f"{R}❌{RST}"
-            nice_name = _nice_name(name)
-            print(f"│  {nice_name:<16s} {status} │  {DIM}(connect first){RST}           │")
+            print(f"\n  {R}■{RST} {BOLD}{nice}{RST}  {DIM}(not connected — /connect {name}){RST}")
 
-    print(f"└──────────────────────┴───────────────────────────┘")
-
-    # Show active
-    active = manager.get_active()
-    if active:
-        print(f"\n  {DIM}Active:{RST} {_nice_name(manager.active_provider_name)} / {manager.active_model}")
+    print(f"\n  {'─' * 50}")
+    print(f"  {DIM}Switch:{RST} /use <provider> <model>")
     print()
+
+
+def _recommend(provider_name: str) -> str:
+    """Return the recommended model id per provider."""
+    return {
+        "github_copilot": "gpt-4o",
+        "claude": "claude-3-5-haiku-latest",
+        "openai": "gpt-4o",
+        "ollama": "llama3",
+    }.get(provider_name, "")
 
 
 def _nice_name(name: str) -> str:
