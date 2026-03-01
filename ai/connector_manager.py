@@ -144,13 +144,9 @@ class ConnectorManager:
         if self.connect("ollama"):
             connected_any = True
 
-        # 4. Try GitHub Copilot (needs gh CLI)
-        # Only auto-connect if we have a saved token
-        saved = self._load_saved_providers()
-        gh_token = saved.get("github_copilot", {}).get("token")
-        if gh_token:
-            if self.connect("github_copilot", token=gh_token):
-                connected_any = True
+        # 4. Try GitHub Copilot (reads from Windows Credential Manager / env)
+        if self.connect("github_copilot"):
+            connected_any = True
 
         # Restore active provider from config
         if self.active_provider_name:
@@ -242,7 +238,7 @@ class ConnectorManager:
     # ── private helpers ───────────────────────────────────────────
 
     def _setup_copilot(self) -> bool:
-        print("[*] Checking GitHub CLI...")
+        print("[*] Connecting to GitHub Copilot...")
         if self.connect("github_copilot"):
             self.set_active("github_copilot", "gpt-4o")
             return True
@@ -314,11 +310,10 @@ class ConnectorManager:
         # Save provider-specific info
         for name, provider in self.providers.items():
             pdata: dict[str, Any] = {"connected": provider.is_connected()}
-            if name == "github_copilot" and hasattr(provider, "_token") and provider._token:
-                pdata["token"] = provider._token
             if name == "ollama" and hasattr(provider, "_base_url"):
                 pdata["base_url"] = provider._base_url
-            # We do NOT save API keys here (they come from env / main config)
+            # Note: Copilot tokens come from Windows Credential Manager
+            # API keys come from env vars / main config — not saved here
             data["providers"][name] = pdata
 
         try:

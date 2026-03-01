@@ -1,6 +1,17 @@
-"""GitHub Copilot AI provider for BBHunter."""
+"""GitHub Copilot AI provider for BBHunter.
 
+Auth flow:
+1. Read OAuth token from Windows Credential Manager (copilot-cli or git cred)
+2. Call /copilot_internal/user to get the user's API endpoint + validate token
+3. Use the returned API endpoint for chat completions
+
+The OAuth token from the Copilot CLI works directly as a Bearer token.
+"""
+
+import ctypes
+import ctypes.wintypes
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -9,63 +20,112 @@ from typing import Any
 from ai.base_provider import BaseProvider
 
 
-# Copilot-available models (as of early 2026)
-_COPILOT_MODELS = [
+_GITHUB_API = "https://api.github.com"
+
+# Models dynamically fetched from the API; these are fallback defaults
+_DEFAULT_MODELS = [
     {"id": "gpt-4o", "name": "GPT-4o (Copilot)"},
     {"id": "gpt-4o-mini", "name": "GPT-4o Mini (Copilot)"},
-    {"id": "claude-3.5-sonnet", "name": "Claude 3.5 Sonnet (Copilot)"},
-    {"id": "o1-mini", "name": "o1-mini (Copilot)"},
+    {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo (Copilot)"},
 ]
-
-_API_URL = "https://api.githubcopilot.com/chat/completions"
 
 
 class GitHubCopilotProvider(BaseProvider):
-    """Connects to GitHub Copilot via the `gh` CLI OAuth token."""
+    """Connects to GitHub Copilot using OAuth credentials from the Copilot CLI."""
 
     name = "github_copilot"
     requires_auth = True
 
     def __init__(self) -> None:
-        self._token: str | None = None
+        self._oauth_token: str | None = None     # GitHub OAuth token (long-lived)
+        self._api_url: str = ""                   # e.g. https://api.individual.githubcopilot.com
+        self._copilot_plan: str = ""
+        self._cached_models: list[dict] | None = None
 
     # ── auth ──────────────────────────────────────────────────────
     def authenticate(self, **kwargs) -> bool:
         """
-        Authenticate via the GitHub CLI.
-        1. Check `gh auth status`
-        2. If not logged in, prompt user to run `gh auth login`
-        3. Grab a Copilot chat token from `gh copilot` API endpoint
+        Try multiple auth sources:
+        1. Explicit token kwarg
+        2. Copilot CLI cred from Windows Credential Manager
+        3. Git cred from Windows Credential Manager
+        4. GITHUB_TOKEN / GH_TOKEN env vars
+        5. gh CLI (gh auth token)
         """
-        token = kwargs.get("token")
-        if token:
-            self._token = token
-            return True
+        tok = kwargs.get("token") or kwargs.get("oauth_token")
+        if tok:
+            self._oauth_token = tok
+            return self._validate_copilot_access()
 
-        # Check gh CLI is available
-        if not self._gh_installed():
-            print("[!] GitHub CLI (`gh`) is not installed. Install from https://cli.github.com")
-            return False
+        # 1. Copilot CLI credential
+        print("[*] Checking Copilot CLI credentials...")
+        cred = _read_windows_credential("copilot-cli/https://github.com")
+        if cred:
+            self._oauth_token = cred
+            if self._validate_copilot_access():
+                return True
 
-        # Check logged in
-        if not self._gh_authenticated():
-            print("[*] Not logged in to GitHub CLI. Running `gh auth login`...")
-            try:
-                subprocess.run(["gh", "auth", "login"], check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                print("[!] `gh auth login` failed.")
-                return False
+        # 2. Git credential
+        print("[*] Checking Git credentials...")
+        cred = _read_windows_credential("git:https://github.com")
+        if cred:
+            self._oauth_token = cred
+            if self._validate_copilot_access():
+                return True
 
-        # Fetch a Copilot token
-        self._token = self._fetch_copilot_token()
-        return self._token is not None
+        # 3. Environment variables
+        for env in ("GITHUB_TOKEN", "GH_TOKEN"):
+            tok = os.getenv(env, "")
+            if tok:
+                print(f"[*] Trying {env}...")
+                self._oauth_token = tok
+                if self._validate_copilot_access():
+                    return True
+
+        # 4. gh CLI
+        gh_tok = self._try_gh_cli_token()
+        if gh_tok:
+            self._oauth_token = gh_tok
+            if self._validate_copilot_access():
+                return True
+
+        print("[!] Could not authenticate with GitHub Copilot.")
+        self._oauth_token = None
+        return False
 
     def is_connected(self) -> bool:
-        return self._token is not None
+        return bool(self._oauth_token and self._api_url)
 
     # ── models ────────────────────────────────────────────────────
     def list_models(self) -> list[dict]:
-        return list(_COPILOT_MODELS)
+        if self._cached_models is not None:
+            return self._cached_models
+
+        if not self.is_connected():
+            return list(_DEFAULT_MODELS)
+
+        # Fetch from API
+        try:
+            req = urllib.request.Request(
+                f"{self._api_url}/models",
+                headers={
+                    "Authorization": f"Bearer {self._oauth_token}",
+                    "Accept": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+            models = []
+            for m in data.get("data", []):
+                mid = m.get("id", "")
+                models.append({"id": mid, "name": f"{mid} (Copilot)"})
+            if models:
+                self._cached_models = models
+                return models
+        except Exception:
+            pass
+
+        return list(_DEFAULT_MODELS)
 
     # ── chat ──────────────────────────────────────────────────────
     def chat(
@@ -75,12 +135,11 @@ class GitHubCopilotProvider(BaseProvider):
         system: str | None = None,
         tools: list[dict] | None = None,
     ) -> dict[str, Any]:
-        if not self._token:
+        if not self.is_connected():
             raise RuntimeError("GitHub Copilot is not authenticated. Run /connectors to connect.")
 
         model = model or "gpt-4o"
 
-        # Build OpenAI-compatible payload
         oai_messages: list[dict] = []
         if system:
             oai_messages.append({"role": "system", "content": system})
@@ -100,19 +159,20 @@ class GitHubCopilotProvider(BaseProvider):
 
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
-            _API_URL,
+            f"{self._api_url}/chat/completions",
             data=data,
             headers={
-                "Authorization": f"Bearer {self._token}",
+                "Authorization": f"Bearer {self._oauth_token}",
                 "Content-Type": "application/json",
-                "Editor-Version": "vscode/1.85.0",
+                "Editor-Version": "vscode/1.96.0",
                 "Copilot-Integration-Id": "vscode-chat",
+                "Editor-Plugin-Version": "copilot-chat/0.24.0",
             },
             method="POST",
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=90) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 result = json.loads(resp.read().decode())
         except urllib.error.HTTPError as ex:
             body = ex.read().decode("utf-8", errors="ignore")
@@ -120,55 +180,78 @@ class GitHubCopilotProvider(BaseProvider):
 
         return self._normalise_response(result)
 
-    # ── internal helpers ──────────────────────────────────────────
-    @staticmethod
-    def _gh_installed() -> bool:
+    # ── validate Copilot access ───────────────────────────────────
+    def _validate_copilot_access(self) -> bool:
+        """
+        Call /copilot_internal/user to:
+        1. Validate the token has Copilot access
+        2. Get the per-user API endpoint (e.g. api.individual.githubcopilot.com)
+        """
+        if not self._oauth_token:
+            return False
         try:
-            subprocess.run(["gh", "--version"], capture_output=True, check=True)
+            req = urllib.request.Request(
+                f"{_GITHUB_API}/copilot_internal/user",
+                headers={
+                    "Authorization": f"Bearer {self._oauth_token}",
+                    "Accept": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+
+            endpoints = data.get("endpoints", {})
+            api_url = endpoints.get("api", "")
+            if not api_url:
+                print("[!] Copilot user endpoint returned no API URL.")
+                return False
+
+            self._api_url = api_url.rstrip("/")
+            self._copilot_plan = data.get("copilot_plan", "unknown")
+            chat_ok = data.get("chat_enabled", False)
+
+            print(f"[+] Copilot connected! Plan: {self._copilot_plan} | Chat: {chat_ok}")
+            print(f"    API: {self._api_url}")
             return True
-        except (FileNotFoundError, subprocess.CalledProcessError):
+
+        except urllib.error.HTTPError as ex:
+            body = ex.read().decode("utf-8", errors="ignore")[:200]
+            if ex.code == 401:
+                print("[!] Token not valid for Copilot.")
+            elif ex.code == 404:
+                print("[!] No Copilot subscription found for this account.")
+            else:
+                print(f"[!] Copilot validation failed (HTTP {ex.code}): {body}")
+            return False
+        except Exception as ex:
+            print(f"[!] Copilot validation error: {ex}")
             return False
 
+    # ── CLI helpers ───────────────────────────────────────────────
     @staticmethod
-    def _gh_authenticated() -> bool:
-        try:
-            r = subprocess.run(["gh", "auth", "status"], capture_output=True)
-            return r.returncode == 0
-        except FileNotFoundError:
-            return False
-
-    @staticmethod
-    def _fetch_copilot_token() -> str | None:
-        """Use the gh CLI to get a Copilot token via internal API."""
+    def _try_gh_cli_token() -> str | None:
         try:
             r = subprocess.run(
-                ["gh", "api", "-X", "GET",
-                 "https://api.github.com/copilot_internal/v2/token",
-                 "-H", "Accept: application/json"],
+                ["gh", "auth", "token"],
                 capture_output=True, text=True, check=True,
             )
-            data = json.loads(r.stdout)
-            token = data.get("token")
-            if token:
-                print(f"[+] Copilot token acquired (expires {data.get('expires_at', 'unknown')})")
-                return token
-            print("[!] Token response did not contain a token field.")
-            return None
-        except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError) as ex:
-            print(f"[!] Failed to fetch Copilot token: {ex}")
-            return None
+            tok = r.stdout.strip()
+            if tok:
+                print("[+] Got token from gh CLI")
+                return tok
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+        return None
 
+    # ── message/tool normalisation (Anthropic ↔ OpenAI) ──────────
     @staticmethod
     def _normalise_message(msg: dict) -> dict:
-        """Convert Anthropic-style messages to OpenAI-style if needed."""
         role = msg.get("role", "user")
         content = msg.get("content", "")
 
-        # If content is already a string, passthrough
         if isinstance(content, str):
             return {"role": role, "content": content}
 
-        # Anthropic list-of-blocks → single string (text blocks)
         if isinstance(content, list):
             parts: list[str] = []
             tool_calls: list[dict] = []
@@ -197,7 +280,6 @@ class GitHubCopilotProvider(BaseProvider):
                     })
 
             if tool_results:
-                # Return only the first tool result; caller loops for others
                 return tool_results[0]
 
             out: dict[str, Any] = {"role": role}
@@ -212,7 +294,6 @@ class GitHubCopilotProvider(BaseProvider):
 
     @staticmethod
     def _convert_tools(anthropic_tools: list[dict]) -> list[dict]:
-        """Convert Anthropic tool defs to OpenAI function-calling format."""
         oai_tools: list[dict] = []
         for t in anthropic_tools:
             oai_tools.append({
@@ -227,16 +308,10 @@ class GitHubCopilotProvider(BaseProvider):
 
     @staticmethod
     def _normalise_response(oai_resp: dict) -> dict[str, Any]:
-        """
-        Convert an OpenAI chat-completion response to the Anthropic-style
-        format that the BBHunter agent loop expects.
-        """
         choice = oai_resp.get("choices", [{}])[0]
         message = choice.get("message", {})
-        finish = choice.get("finish_reason", "stop")
 
         content_blocks: list[dict] = []
-
         if message.get("content"):
             content_blocks.append({"type": "text", "text": message["content"]})
 
@@ -257,3 +332,69 @@ class GitHubCopilotProvider(BaseProvider):
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
         return {"content": content_blocks, "stop_reason": stop_reason}
+
+
+# ── Windows Credential Manager reader ────────────────────────────────
+def _read_windows_credential(target_name: str) -> str | None:
+    """
+    Read a credential from Windows Credential Manager by target name.
+    Searches for partial matches (the Copilot CLI stores creds with
+    the GitHub username appended).
+    """
+    if os.name != "nt":
+        return None
+
+    try:
+        advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
+
+        class CREDENTIAL(ctypes.Structure):
+            _fields_ = [
+                ("Flags", ctypes.wintypes.DWORD),
+                ("Type", ctypes.wintypes.DWORD),
+                ("TargetName", ctypes.wintypes.LPWSTR),
+                ("Comment", ctypes.wintypes.LPWSTR),
+                ("LastWritten", ctypes.wintypes.FILETIME),
+                ("CredentialBlobSize", ctypes.wintypes.DWORD),
+                ("CredentialBlob", ctypes.POINTER(ctypes.c_char)),
+                ("Persist", ctypes.wintypes.DWORD),
+                ("AttributeCount", ctypes.wintypes.DWORD),
+                ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", ctypes.wintypes.LPWSTR),
+                ("UserName", ctypes.wintypes.LPWSTR),
+            ]
+
+        PCREDENTIAL = ctypes.POINTER(CREDENTIAL)
+
+        # Try exact match first
+        cred_ptr = PCREDENTIAL()
+        ok = advapi32.CredReadW(target_name, 1, 0, ctypes.byref(cred_ptr))
+        if ok:
+            cred = cred_ptr.contents
+            blob = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+            advapi32.CredFree(cred_ptr)
+            return blob.decode("utf-8", errors="ignore").strip()
+
+        # Enumerate and find partial match
+        pcreds = ctypes.POINTER(PCREDENTIAL)()
+        count = ctypes.wintypes.DWORD()
+        ok = advapi32.CredEnumerateW(
+            None, 0, ctypes.byref(count), ctypes.byref(pcreds)
+        )
+        if not ok:
+            return None
+
+        result = None
+        for i in range(count.value):
+            c = pcreds[i].contents
+            cred_target = c.TargetName or ""
+            if target_name.lower() in cred_target.lower():
+                blob = ctypes.string_at(c.CredentialBlob, c.CredentialBlobSize)
+                result = blob.decode("utf-8", errors="ignore").strip()
+                break
+
+        advapi32.CredFree(pcreds)
+        return result
+
+    except Exception as ex:
+        print(f"[!] Could not read Windows credentials: {ex}")
+        return None
